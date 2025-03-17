@@ -22,7 +22,6 @@ BOOK_SHELF = "book.shelf"
 def update_file_data(file_unique_id, pages):
     with shelve.open(BOOK_SHELF, flag='c') as db:
         db[file_unique_id] = pages
-    print(f"Updated data for key: {file_unique_id}")
 
 def load_data():
     with shelve.open(BOOK_SHELF, flag='r') as db:
