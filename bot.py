@@ -37,7 +37,6 @@ def remove_file_data(file_unique_id):
     with shelve.open(BOOK_SHELF, flag='w') as db:
         if file_unique_id in db:
             del db[file_unique_id]
-            print(f"Removed data for key: {file_unique_id}")
 
 def get_file_hash(filename, algorithm="sha256", chunk_size=8192):
     hash_obj = hashlib.new(algorithm)
@@ -65,7 +64,6 @@ async def cmd_start(message: types.Message, bot: Bot):
                   f"Last refreshed: <code>{formatted_datetime}</code>")
 
     with suppress(TelegramBadRequest):
-        print("HEY")
         await bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=943,
@@ -128,7 +126,6 @@ async def process_document(message: types.Message, bot: Bot) -> Any:
 
     update_file_data(unique_file_id, npage)
     os.remove(file_path)
-    print("SUCCESS")
 
 
 async def main():
