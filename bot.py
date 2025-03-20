@@ -67,6 +67,7 @@ async def create_library(db: Connection):
         pages INTEGER NOT NULL,
         title TEXT NOT NULL,
         authors TEXT NOT NULL,
+        size REAL NOT NULL,
         message_id UNIQUE NOT NULL,
         file_id TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -75,10 +76,11 @@ async def create_library(db: Connection):
     await db.commit()
 
 async def add_book(db: Connection, book_id, cat_name, npage,
-                   title, authors, message_id, file_id) -> None:
+                   title, authors, file_size, message_id, file_id) -> None:
     await db.execute(
-        "INSERT INTO library (id, cat_name, pages, title, authors, message_id, file_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (book_id, cat_name, npage, title, authors, message_id, file_id)
+        "INSERT INTO library (id, cat_name, pages, title, authors, size, message_id, file_id) VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?)",
+        (book_id, cat_name, npage, title, authors, file_size, message_id, file_id)
     )
     await db.commit()
 
@@ -89,7 +91,6 @@ async def remove_book(db: Connection, message_id) -> None:
 async def check_exists(db: Connection, book_id) -> bool:
     async with db.execute("SELECT 1 FROM library WHERE id = ?", (book_id,)) as cursor:
         exists = await cursor.fetchone()
-        print(exists)
     return bool(exists)
 
 async def get_library_stats(db: Connection):
@@ -99,18 +100,23 @@ async def get_library_stats(db: Connection):
     async with db.execute("SELECT COALESCE(SUM(pages), 0) FROM library") as cursor: # Total pages
         total_pages = (await cursor.fetchone())[0]
 
+    async with db.execute("SELECT COALESCE(SUM(size), 0) FROM library") as cursor: # Total size
+        total_size = (await cursor.fetchone())[0]
+
     async with db.execute("SELECT COUNT(DISTINCT cat_name) FROM library") as cursor: # Total categories
         total_categories = (await cursor.fetchone())[0]
 
-    async with db.execute("""SELECT cat_name, COUNT(*) AS book_count, SUM(pages) AS total_pages
-                             FROM library
-                             GROUP BY cat_name
-                             ORDER BY cat_name""") as cursor: # Books and Pages per category
+    async with db.execute("""
+        SELECT cat_name, COUNT(*) AS book_count, SUM(pages) AS total_pages, SUM(size) AS total_size
+        FROM library
+        GROUP BY cat_name
+        ORDER BY cat_name""") as cursor: # Books and Pages per category
         per_category = await cursor.fetchall()
 
     return {
         "total_books": total_books,
         "total_pages": total_pages,
+        "total_size": total_size,
         "total_categories": total_categories,
         "per_category": per_category
     }
@@ -134,6 +140,7 @@ async def update_stats(message: types.Message, bot: Bot, db: Connection):
     stats = await get_library_stats(db)
     total_books = stats["total_books"]
     total_pages = stats["total_pages"]
+    total_size = stats["total_size"]
     total_categories = stats["total_categories"]
     per_category = stats["per_category"]
     now = datetime.now(ZoneInfo("UTC")).astimezone()
@@ -141,10 +148,12 @@ async def update_stats(message: types.Message, bot: Bot, db: Connection):
 
     general_stats = (f"<b>Total books:</b> {hcode(total_books)}\n"
                      f"<b>Total pages:</b> {hcode(total_pages)}\n"
+                     f"<b>Total size:</b> <code>{total_size:.2f} MB</code>\n"
                      f"<b>Total categories:</b> {hcode(total_categories)}")
 
-    detailed_stats = "\n".join([f"{hbold(category)}: {hcode(books)} books, {hcode(pages)} pages"
-                                   for category, books, pages in per_category])
+    detailed_stats = "\n".join([f"{hbold(category)}: {hcode(books)} books, {hcode(pages)} pages, "
+                                f"<code>{size:.2f} MB</code>"
+                                for category, books, pages, size in per_category])
     if detailed_stats: detailed_stats = "\n" + detailed_stats + "\n"
     refreshed_time = f"<b>Last refreshed:</b> {hcode(formatted_datetime)}"
 
@@ -159,14 +168,12 @@ async def update_stats(message: types.Message, bot: Bot, db: Connection):
 
 @router.message(F.document, F.message_thread_id, ~F.message_thread_id.in_([738, 741]), F.from_user.id.in_({569356638}))
 async def process_document(message: types.Message, bot: Bot, db: Connection) -> Any:
-    file = await bot.get_file(message.document.file_id, request_timeout=300)
+    file = await bot.get_file(message.document.file_id, request_timeout=600)
     file_path = file.file_path
     unique_file_id = get_file_hash(file_path)
     await message.delete()
 
     exists = await check_exists(db, unique_file_id)
-    print(unique_file_id)
-    print(exists)
     if exists:
         os.remove(file_path)
         return
@@ -178,25 +185,30 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
     authors, title = map(str.strip, full_title.split(":", 1))
     npage = document_file.page_count
     cat_name = to_cat[message.message_thread_id]
+    file_size_bytes = os.path.getsize(file_path)
+    file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
     document_file.close()
     caption = (f"<b>Title:</b> {hcode(title)}\n"
                f"<b>Authors:</b> {hcode(authors)}\n"
-               f"<b>Pages:</b> {hcode(npage)}. <b>Format:</b> {hcode(ext)}.")
+               f"<b>Pages:</b> {hcode(npage)}. <b>Format:</b> {hcode(ext)}. "
+               f"<b>Size:</b> <code>{file_size_mb:.2f} MB</code>.")
     document = FSInputFile(path=file_path, filename=title + "." + ext)
 
     if message.reply_to_message.forum_topic_created:
         try:
             book = await message.answer_document(
                 document=document,
-                caption=caption
+                caption=caption,
+                request_timeout=600
             )
             await add_book(db=db, book_id=unique_file_id, cat_name=cat_name, npage=npage, title=title,
-                           authors=authors, message_id=book.message_id, file_id=book.document.file_id)
+                           authors=authors, file_size=file_size_mb, message_id=book.message_id,
+                           file_id=book.document.file_id)
         except TelegramRetryAfter as e:
             logging.warning(f"Flood control triggered. Document sending. Sleeping for {e.retry_after} seconds.")
             await asyncio.sleep(e.retry_after)
-        except TelegramNetworkError as e:
-            logging.warning(f"Again network problems... {e}")
+        # except TelegramNetworkError as e:
+        #     logging.warning(f"Again network problems... {e}")
     elif message.reply_to_message.from_user.is_bot:
         link = message.reply_to_message.get_url(include_thread_id=True)
         text_to_sender = (f"The <a href='{link}'>book</a> has been modified.\n"
@@ -215,7 +227,8 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
             media=InputMediaDocument(media=document, caption=caption)
         )
         await add_book(db=db, book_id=unique_file_id, cat_name=cat_name, npage=npage, title=title,
-                       authors=authors, message_id=book.message_id, file_id=book.document.file_id)
+                       authors=authors, file_size=file_size_mb, message_id=book.message_id,
+                       file_id=book.document.file_id)
     os.remove(file_path)
 
 
@@ -231,7 +244,8 @@ async def main():
     bot = Bot(
         token=config.bot_token.get_secret_value(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        session=session
+        session=session,
+        request_timeout=600
     )
     dp = Dispatcher()
     dp.include_routers(router)
