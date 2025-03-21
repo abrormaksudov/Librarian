@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import io
 import logging
 import os
 from contextlib import suppress
@@ -9,6 +10,7 @@ from typing import Any
 
 import aiosqlite
 import fitz
+from PIL import Image
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -16,7 +18,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, InputMediaDocument
+from aiogram.types import FSInputFile, InputMediaDocument, BufferedInputFile
 from aiogram.utils.markdown import hcode, hbold
 from aiosqlite import Connection
 from config_reader import config
@@ -58,6 +60,34 @@ def get_file_hash(filename, algorithm="sha256", chunk_size=8192):
         for chunk in iter(lambda: f.read(chunk_size), b""):
             hash_obj.update(chunk)
     return hash_obj.hexdigest()
+
+
+def get_thumbnail(doc, max_size=200, dimension=320):
+    first_page = doc[0]
+    rect = first_page.rect
+    orig_width, orig_height = rect.width, rect.height
+    zoom_factor = dimension / orig_width
+    pix = first_page.get_pixmap(matrix=fitz.Matrix(zoom_factor, zoom_factor), alpha=False)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    square_img = Image.new("RGB", (dimension, dimension), (255, 255, 255))
+    paste_x = 0
+    paste_y = (dimension - img.height) // 2 if img.height < dimension else 0
+
+    if img.height > dimension:
+        crop_top = (img.height - dimension) // 2
+        img = img.crop((0, crop_top, img.width, crop_top + dimension))
+
+    square_img.paste(img, (paste_x, paste_y))
+    img_bytesio = io.BytesIO()
+    quality = 90
+    square_img.save(img_bytesio, format="JPEG", quality=quality)
+    while img_bytesio.tell() > max_size * 1024 and quality > 10:
+        quality -= 10
+        img_bytesio = io.BytesIO()
+        square_img.save(img_bytesio, format="JPEG", quality=quality)
+    img_bytesio.seek(0)
+
+    return img_bytesio
 
 async def create_library(db: Connection):
     await db.execute("""
@@ -187,11 +217,18 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
     cat_name = to_cat[message.message_thread_id]
     file_size_bytes = os.path.getsize(file_path)
     file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+    if ext == "pdf" and file_size_mb > 10:
+        thumbnail_img: io.BytesIO = get_thumbnail(document_file)
+        thumbnail = BufferedInputFile(thumbnail_img.getvalue(), "thumb.jpeg")
+    else:
+        thumbnail = None
+
     document_file.close()
     caption = (f"<b>Title:</b> {hcode(title)}\n"
                f"<b>Authors:</b> {hcode(authors)}\n"
                f"<b>Pages:</b> {hcode(npage)}. <b>Format:</b> {hcode(ext)}. "
                f"<b>Size:</b> <code>{file_size_mb:.2f} MB</code>.")
+
     document = FSInputFile(path=file_path, filename=title + "." + ext)
 
     if message.reply_to_message.forum_topic_created:
@@ -199,7 +236,8 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
             book = await message.answer_document(
                 document=document,
                 caption=caption,
-                request_timeout=600
+                request_timeout=600,
+                thumbnail=thumbnail
             )
             await add_book(db=db, book_id=unique_file_id, cat_name=cat_name, npage=npage, title=title,
                            authors=authors, file_size=file_size_mb, message_id=book.message_id,
@@ -207,24 +245,24 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
         except TelegramRetryAfter as e:
             logging.warning(f"Flood control triggered. Document sending. Sleeping for {e.retry_after} seconds.")
             await asyncio.sleep(e.retry_after)
-        # except TelegramNetworkError as e:
-        #     logging.warning(f"Again network problems... {e}")
+        except TelegramNetworkError as e:
+            logging.warning(f"The book {full_title} was unsuccessful. Try again.\n({e})")
     elif message.reply_to_message.from_user.is_bot:
         link = message.reply_to_message.get_url(include_thread_id=True)
-        text_to_sender = (f"The <a href='{link}'>book</a> has been modified.\n"
-                          f"Previously, it was:\n\n"
-                          f"{message.reply_to_message.caption}")
+        notify_text = (f"The <a href='{link}'>book</a> has been modified.\n"
+                       f"Previously, it was:\n\n"
+                       f"{message.reply_to_message.caption}")
 
         await remove_book(db, message.reply_to_message.message_id)
         await message.bot.send_document(
             chat_id=message.from_user.id,
             document=message.reply_to_message.document.file_id,
-            caption=text_to_sender
+            caption=notify_text
         )
         book = await message.bot.edit_message_media(
             chat_id=message.chat.id,
             message_id=message.reply_to_message.message_id,
-            media=InputMediaDocument(media=document, caption=caption)
+            media=InputMediaDocument(media=document, caption=caption, thumbnail=thumbnail)
         )
         await add_book(db=db, book_id=unique_file_id, cat_name=cat_name, npage=npage, title=title,
                        authors=authors, file_size=file_size_mb, message_id=book.message_id,
