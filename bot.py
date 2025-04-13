@@ -51,7 +51,8 @@ to_cat = {
     1090: "R",
     1092: "SQL",
     1094: "Statistics",
-    1096: "Visualizations"
+    1096: "Visualizations",
+    5213: "C/C++"
 }
 
 def get_file_hash(filename, algorithm="sha256", chunk_size=8192):
@@ -151,14 +152,14 @@ async def get_library_stats(db: Connection):
         "per_category": per_category
     }
 
-@router.message(Command("delete"), F.from_user.id.in_({569356638}))
+@router.message(Command("delete"), F.from_user.id.in_({569356638, 1087968824}))
 async def delete_book(message: types.Message, db: Connection):
     await message.delete()
     await remove_book(db, message.reply_to_message.message_id)
     notify_text = (f"The following book has been removed successfully:\n"
                    f"{hcode(message.reply_to_message.caption)}")
     await message.bot.send_document(
-        chat_id=message.from_user.id,
+        chat_id=569356638,
         document=message.reply_to_message.document.file_id,
         caption=notify_text
     )
@@ -181,8 +182,7 @@ async def update_stats(message: types.Message, bot: Bot, db: Connection):
                      f"<b>Total size:</b> <code>{total_size:.2f} MB</code>\n"
                      f"<b>Total categories:</b> {hcode(total_categories)}")
 
-    detailed_stats = "\n".join([f"{hbold(category)}: {hcode(books)} books, {hcode(pages)} pages, "
-                                f"<code>{size:.2f} MB</code>"
+    detailed_stats = "\n".join([f"{hbold(category)}: <code>{books} books, {pages} pages, {size:.2f} MB</code>"
                                 for category, books, pages, size in per_category])
     if detailed_stats: detailed_stats = "\n" + detailed_stats + "\n"
     refreshed_time = f"<b>Last refreshed:</b> {hcode(formatted_datetime)}"
@@ -196,7 +196,8 @@ async def update_stats(message: types.Message, bot: Bot, db: Connection):
             text=stats_text
         )
 
-@router.message(F.document, F.message_thread_id, ~F.message_thread_id.in_([738, 741]), F.from_user.id.in_({569356638}))
+@router.message(F.document, F.message_thread_id, ~F.message_thread_id.in_([738, 741]),
+                F.from_user.id.in_({569356638, 1087968824}))
 async def process_document(message: types.Message, bot: Bot, db: Connection) -> Any:
     file = await bot.get_file(message.document.file_id, request_timeout=600)
     file_path = file.file_path
@@ -255,7 +256,7 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
 
         await remove_book(db, message.reply_to_message.message_id)
         await message.bot.send_document(
-            chat_id=message.from_user.id,
+            chat_id=569356638,
             document=message.reply_to_message.document.file_id,
             caption=notify_text
         )
