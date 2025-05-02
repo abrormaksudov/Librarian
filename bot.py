@@ -218,7 +218,7 @@ async def process_document(message: types.Message, bot: Bot, db: Connection) -> 
     cat_name = to_cat[message.message_thread_id]
     file_size_bytes = os.path.getsize(file_path)
     file_size_mb = round(file_size_bytes / (1024 * 1024), 2)
-    if ext == "pdf" and file_size_mb > 10:
+    if ext == "pdf":
         thumbnail_img: io.BytesIO = get_thumbnail(document_file)
         thumbnail = BufferedInputFile(thumbnail_img.getvalue(), "thumb.jpeg")
     else:
